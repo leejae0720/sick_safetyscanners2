@@ -101,6 +101,8 @@ private:
   // Services
   rclcpp::Service<sick_safetyscanners2_interfaces::srv::FieldData>::SharedPtr
       m_field_data_service;
+  rclcpp::Service<sick_safetyscanners2_interfaces::srv::StatusOverview>::
+      SharedPtr m_status_overview_service;
 
   // Callback function passed to the device for handling the received packages
   void receiveUDPPaket(const sick::datastructure::Data &data);

@@ -70,6 +70,12 @@ SickSafetyscannersLifeCycle::on_configure(const rclcpp_lifecycle::State &) {
           std::bind(&SickSafetyscannersLifeCycle::getFieldData, this,
                     std::placeholders::_1, std::placeholders::_2));
 
+  m_status_overview_service = this->create_service<
+      sick_safetyscanners2_interfaces::srv::StatusOverview>(
+      "status_overview",
+      std::bind(&SickSafetyscannersLifeCycle::getStatusOverview, this,
+                std::placeholders::_1, std::placeholders::_2));
+
   // Dynamic Parameter Change client
   m_param_callback = add_on_set_parameters_callback(
       std::bind(&SickSafetyscannersLifeCycle::parametersCallback, this,
