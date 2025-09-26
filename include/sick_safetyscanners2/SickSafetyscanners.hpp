@@ -39,6 +39,7 @@
 #include <sick_safetyscanners_base/SickSafetyscanners.h>
 
 #include <sick_safetyscanners2_interfaces/srv/field_data.hpp>
+#include <sick_safetyscanners2_interfaces/srv/status_overview.hpp>
 
 #include <sick_safetyscanners2/utils/Conversions.h>
 #include <sick_safetyscanners2/utils/MessageCreator.h>
@@ -336,6 +337,13 @@ public:
           sick_safetyscanners2_interfaces::srv::FieldData::Request>
           request,
       std::shared_ptr<sick_safetyscanners2_interfaces::srv::FieldData::Response>
+          response);
+  bool getStatusOverview(
+      const std::shared_ptr<
+          sick_safetyscanners2_interfaces::srv::StatusOverview::Request>
+          request,
+      std::shared_ptr<
+          sick_safetyscanners2_interfaces::srv::StatusOverview::Response>
           response);
 
   void readPersistentConfig();

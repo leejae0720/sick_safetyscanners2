@@ -284,6 +284,39 @@ bool SickSafetyscanners::getFieldData(
   return true;
 }
 
+bool SickSafetyscanners::getStatusOverview(
+    const std::shared_ptr<
+        sick_safetyscanners2_interfaces::srv::StatusOverview::Request>
+        request,
+    std::shared_ptr<
+        sick_safetyscanners2_interfaces::srv::StatusOverview::Response>
+        response) {
+  (void)request;
+
+  sick::datastructure::StatusOverview d;
+  m_device->requestStatusOverview(d);
+
+  response->version_c_version = d.getVersionCVersion();
+  response->version_major_version_number = d.getVersionMajorVersionNumber();
+  response->version_minor_version_number = d.getVersionMinorVersionNumber();
+  response->version_release_number = d.getVersionReleaseNumber();
+
+  response->device_state = d.getDeviceState();
+  response->config_state = d.getConfigState();
+  response->application_state = d.getApplicationState();
+  response->current_time_power_on_count = d.getCurrentTimePowerOnCount();
+
+  response->current_time_time = d.getCurrentTimeTime();
+  response->current_time_date = d.getCurrentTimeDate();
+
+  response->error_info_code = d.getErrorInfoCode();
+
+  response->error_info_time = d.getErrorInfoTime();
+  response->error_info_time_date = d.getErrorInfoDate();
+
+  return true;
+}
+
 void SickSafetyscanners::readTypeCodeSettings() {
   RCLCPP_INFO(getLogger(), "Reading Type code settings");
   sick::datastructure::TypeCode type_code;
