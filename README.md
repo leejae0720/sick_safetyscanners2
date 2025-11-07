@@ -19,7 +19,6 @@ Supported are all microScan3, nanoScan3 and outdoorScan3 variants with Ethernet 
 ![ ](docs/images/safetyscanners.png  "Sick Safetyscanner Family")
 
 
-
 ## Getting started
 In the future the ROS2 driver will be released as a debian package, currently only build from source
 is supported.
