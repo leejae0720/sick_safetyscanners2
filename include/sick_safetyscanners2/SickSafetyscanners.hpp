@@ -27,6 +27,7 @@
 #include <chrono>
 #include <memory>
 #include <sstream>
+#include <mutex>
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>

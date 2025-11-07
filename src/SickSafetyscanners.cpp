@@ -23,7 +23,7 @@
 
 //----------------------------------------------------------------------
 /*!
- * \file SickSafetyscanners.h
+ * \file SickSafetyscanners.cpp
  *
  * \author  Rein Appeldoorn <rein.appeldoorn@lowpad.com>
  * \date    2023-09-07
@@ -33,11 +33,14 @@
 #include <sick_safetyscanners2/SickSafetyscanners.hpp>
 
 namespace {
+
+std::mutex g_comm_mtx;                 // 통신 리스타트 동기화용
+std::atomic<bool> g_restarting{false}; // 재시작 중 플래그
 // --- 파일 로컬(전역) 워치독 상태: 헤더 수정 없이 동작하도록 설계 ---
 std::atomic<bool> g_watchdog_running{false};
 std::thread       g_watchdog_thread;
 std::atomic<int64_t> g_last_rx_ns{0};
-constexpr int kTimeoutSec = 5;                 // 무응답 허용 시간(초) — 필요시 숫자만 바꾸세요.
+constexpr int kTimeoutSec = 5; // 무응답 허용 시간(초)
 
 // 재시작 시 필요한 컨텍스트: 현재 인스턴스와 래핑된 콜백
 sick::SickSafetyscanners* g_self = nullptr;
@@ -55,35 +58,53 @@ inline void stop_watchdog() {
   if (g_watchdog_thread.joinable()) g_watchdog_thread.join();
 }
 
-// g_self, g_wrapped_cb를 이용해 통신을 (재)설정
+// 통신 (재)설정
 inline void restart_comm() {
   if (!g_self) return;
   auto& self = *g_self;
+
+  // 1) 이전 디바이스 안전 종료 (예외 무시)
   try {
     if (self.m_device) self.m_device->stop();
-  } catch (...) {}
-  self.m_diagnosed_laser_scan_publisher.reset();
-  self.m_diagnostic_updater.reset();
-
-  // 센서 인스턴스 재생성
-  if (self.m_config.m_communications_settings.host_ip.is_multicast()) {
-    self.m_device = std::make_unique<sick::AsyncSickSafetyScanner>(
-        self.m_config.m_sensor_ip, self.m_config.m_tcp_port,
-        self.m_config.m_communications_settings, self.m_config.m_interface_ip,
-        g_wrapped_cb);
-  } else {
-    self.m_device = std::make_unique<sick::AsyncSickSafetyScanner>(
-        self.m_config.m_sensor_ip, self.m_config.m_tcp_port,
-        self.m_config.m_communications_settings, g_wrapped_cb);
+  } catch (const std::exception& e) {
+    spdlog::warn("stop() during restart raised: {}", e.what());
+  } catch (...) {
+    spdlog::warn("stop() during restart raised: unknown error");
   }
 
-  spdlog::info("Communication to Sensor set up (re)started");
+  // (주의) 퍼블리셔/업데이터는 여기서 reset하지 않음 — 재시작 중 콜백 경합 위험 방지 목적이면
+  // 콜백 쪽에서 가드하거나(재시작 플래그) stop 시에만 정리.
 
-  // 재연결 시에는 소켓만 재생성 (메타정보는 초기 1회만)
-  self.m_config.setupMsgCreator();  // 이건 public이라 호출 가능
+  // 2) 디바이스 재생성 + run + 설정 적용
+  try {
+    if (self.m_config.m_communications_settings.host_ip.is_multicast()) {
+      self.m_device = std::make_unique<sick::AsyncSickSafetyScanner>(
+          self.m_config.m_sensor_ip, self.m_config.m_tcp_port,
+          self.m_config.m_communications_settings, self.m_config.m_interface_ip,
+          g_wrapped_cb);
+    } else {
+      self.m_device = std::make_unique<sick::AsyncSickSafetyScanner>(
+          self.m_config.m_sensor_ip, self.m_config.m_tcp_port,
+          self.m_config.m_communications_settings, g_wrapped_cb);
+    }
 
-  // run/설정 적용은 startCommunication()에서 하므로 여기선 수신시간만 리셋
-  mark_rx_now();
+    // 재시작 시에도 run()과 설정 적용 필요
+    self.m_device->run();
+    self.m_device->changeSensorSettings(self.m_config.m_communications_settings);
+
+    spdlog::info("Communication to Sensor set up (re)started");
+    // 성공시 수신 타임스탬프 리셋
+    mark_rx_now();
+  } catch (const std::exception& e) {
+    spdlog::error("LiDAR restart failed: {}", e.what());
+    return; // 다음 워치독 주기에 재시도
+  } catch (...) {
+    spdlog::error("LiDAR restart failed: unknown error");
+    return;
+  }
+
+  // 재연결 시에는 소켓만 재생성하면 충분 (메타정보 읽기는 초기 1회만)
+  self.m_config.setupMsgCreator();
 }
 
 inline void start_watchdog() {
@@ -99,18 +120,19 @@ inline void start_watchdog() {
       const auto diff_ms = (now - last) / 1'000'000;
       if (diff_ms > kTimeoutSec * 1000) {
         if (g_self) {
-          spdlog::warn(
-            "No LiDAR data for %lld ms (> %d s). Restarting driver...",
-            (long long)diff_ms, kTimeoutSec);
+          spdlog::warn("No LiDAR data for {} ms (> {} s). Restarting driver...",
+                       (long long)diff_ms, kTimeoutSec);
         }
         restart_comm();
       }
     }
   });
 }
+
 } // anonymous namespace
 
 namespace sick {
+
 rcl_interfaces::msg::SetParametersResult SickSafetyscanners::parametersCallback(
     std::vector<rclcpp::Parameter> parameters) {
   rcl_interfaces::msg::SetParametersResult result;
@@ -126,7 +148,7 @@ rcl_interfaces::msg::SetParametersResult SickSafetyscanners::parametersCallback(
 
     std::stringstream ss;
     ss << "{" << param.get_name() << ", " << param.value_to_string() << "}";
-    spdlog::info("Got parameter: '%s'", ss.str().c_str());
+    spdlog::info("Got parameter: '{}'", ss.str());
 
     if (param.get_name() == "frame_id") {
       m_config.m_frame_id = param.value_to_string();
@@ -211,7 +233,7 @@ void SickSafetyscanners::setupCommunication(
   // 2) (초기) 통신 설정: 디바이스 재생성(소켓 준비)만 수행
   restart_comm();
 
-  // ✅ 3) 초기 1회: 센서 메타정보/설정 읽기 (멤버 함수라 protected 접근 가능)
+  // 3) 초기 1회: 센서 메타정보/설정 읽기
   readTypeCodeSettings();
   readMetadata();
   readFirmwareVersion();
@@ -220,7 +242,7 @@ void SickSafetyscanners::setupCommunication(
   }
   m_config.setupMsgCreator();  // 메타정보 반영해서 메시지 생성기 구성
 
-  RCLCPP_INFO(getLogger(), "Communication to Sensor set up");
+  spdlog::info("Communication to Sensor set up");
 
   // 4) 워치독 시작 (1초마다 체크, 5초 무응답 시 restart_comm())
   start_watchdog();
@@ -229,11 +251,16 @@ void SickSafetyscanners::setupCommunication(
 void SickSafetyscanners::stopCommunication() {
   // 워치독 먼저 종료
   stop_watchdog();
-  if (m_device) m_device->stop();
+  try {
+    if (m_device) m_device->stop();
+  } catch (const std::exception& e) {
+    spdlog::warn("stop() raised during shutdown: {}", e.what());
+  } catch (...) {
+    spdlog::warn("stop() raised unknown during shutdown");
+  }
   m_diagnosed_laser_scan_publisher.reset();
   m_diagnostic_updater.reset();
 }
-
 
 std::string boolToString(bool b) { return b ? "true" : "false"; }
 
@@ -425,4 +452,5 @@ void SickSafetyscanners::readFirmwareVersion() {
   spdlog::info("Reading firmware version");
   m_device->requestFirmwareVersion(m_config.m_firmware_version);
 }
+
 } // namespace sick
