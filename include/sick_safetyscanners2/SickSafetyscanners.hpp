@@ -1,36 +1,35 @@
 // this is for emacs file handling -*- mode: c++; indent-tabs-mode: nil -*-
-
+//
 // -- BEGIN LICENSE BLOCK ----------------------------------------------
-
-/*!
-*  Copyright (C) 2023, Lowpad, Bleskensgraaf, Netherlands*
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*    http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-
-*/
-
+//
+// Copyright (C) 2023, Lowpad, Bleskensgraaf, Netherlands
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
 // -- END LICENSE BLOCK ------------------------------------------------
 
-//----------------------------------------------------------------------
-/*!
- * \file SickSafetyscanners.h
- *
- * \author  Rein Appeldoorn <rein.appeldoorn@lowpad.com>
- * \date    2023-09-07
- */
-//----------------------------------------------------------------------
-
 #pragma once
+
+#include "spdlog/spdlog.h"
+#include <string>
+#include <atomic>
+#include <thread>
+#include <chrono>
+#include <memory>
+#include <sstream>
+
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/laser_scan.hpp>
 
 #include <diagnostic_updater/diagnostic_status_wrapper.hpp>
 #include <diagnostic_updater/diagnostic_updater.hpp>
@@ -38,30 +37,29 @@
 
 #include <sick_safetyscanners_base/SickSafetyscanners.h>
 
-#include <sick_safetyscanners2_interfaces/srv/field_data.hpp>
-#include <sick_safetyscanners2_interfaces/srv/status_overview.hpp>
-
 #include <sick_safetyscanners2/utils/Conversions.h>
 #include <sick_safetyscanners2/utils/MessageCreator.h>
 
-#include <rclcpp/rclcpp.hpp>
+#include <sick_safetyscanners2_interfaces/msg/raw_micro_scan_data.hpp>
+#include <sick_safetyscanners2_interfaces/msg/data_header.hpp>
+#include <sick_safetyscanners2_interfaces/msg/general_system_state.hpp>
+#include <sick_safetyscanners2_interfaces/msg/field.hpp>
+#include <sick_safetyscanners2_interfaces/msg/monitoring_case.hpp>
 
-#include <string>
+#include <sick_safetyscanners2_interfaces/srv/field_data.hpp>
+#include <sick_safetyscanners2_interfaces/srv/status_overview.hpp>
 
 namespace sick {
 
 /**
  * Sick safety scanners base class that implements the shared functionality
- * between the Node (Ros2) and LifCycle node (LifeCycle)
+ * between the Node (ROS2) and Lifecycle node.
  */
 class SickSafetyscanners {
 public:
   using DiagnosedLaserScanPublisher =
       diagnostic_updater::DiagnosedPublisher<sensor_msgs::msg::LaserScan>;
 
-  /**
-   * Sick safety scanner configuration
-   */
   struct Config {
     void setupMsgCreator() {
       m_msg_creator = std::make_unique<sick::MessageCreator>(
@@ -74,23 +72,21 @@ public:
     std::string m_frame_id;
     double m_time_offset = 0.0;
     double m_range_min = 0.0;
-    double m_range_max;
+    double m_range_max{};
     double m_frequency_tolerance = 0.1;
     double m_expected_frequency = 34.0;
     double m_timestamp_min_acceptable = -1.0;
     double m_timestamp_max_acceptable = 1.0;
     double m_min_intensities = 0.0; /*!< min intensities for laser points */
-    bool m_use_sick_angles;
-    float m_angle_offset = -90.0;
-    bool m_use_pers_conf = false;
+    bool   m_use_sick_angles{};
+    float  m_angle_offset = -90.0f;
+    bool   m_use_pers_conf = false;
 
     sick::types::port_t m_tcp_port = 2122;
 
-    datastructure::ConfigMetadata m_metadata;
-
-    datastructure::FirmwareVersion m_firmware_version;
-
-    sick::datastructure::CommSettings m_communications_settings;
+    sick::datastructure::ConfigMetadata  m_metadata;
+    sick::datastructure::FirmwareVersion m_firmware_version;
+    sick::datastructure::CommSettings    m_communications_settings;
 
     std::unique_ptr<sick::MessageCreator> m_msg_creator;
   };
@@ -98,25 +94,20 @@ public:
   Config m_config;
 
   /**
-   * Initialize parameters for this node
-   *
-   * This method is a template function because the node and lifecycle node
-   * are not sharing the same implementation but have the same interface.
-   *
-   * @tparam NodeT Templated node input
-   * @param node Node
+   * Declare parameters (shared by ROS2 node and Lifecycle node).
    */
-  template <typename NodeT> static void initializeParameters(NodeT &node) {
+  template <typename NodeT>
+  static void initializeParameters(NodeT &node) {
     node.template declare_parameter<std::string>("frame_id", "scan");
     node.template declare_parameter<std::string>("sensor_ip", "192.168.1.11");
-    node.template declare_parameter<std::string>("host_ip", "192.168.1.9");
+    node.template declare_parameter<std::string>("host_ip",   "192.168.1.9");
     node.template declare_parameter<std::string>("interface_ip", "0.0.0.0");
     node.template declare_parameter<int>("host_udp_port", 0);
     node.template declare_parameter<int>("channel", 0);
     node.template declare_parameter<bool>("channel_enabled", true);
     node.template declare_parameter<int>("skip", 0);
     node.template declare_parameter<double>("angle_start", 0.0);
-    node.template declare_parameter<double>("angle_end", 0.0);
+    node.template declare_parameter<double>("angle_end",   0.0);
     node.template declare_parameter<double>("time_offset", 0.0);
     node.template declare_parameter<bool>("general_system_state", true);
     node.template declare_parameter<bool>("derived_settings", true);
@@ -129,19 +120,18 @@ public:
     node.template declare_parameter<double>("expected_frequency", 34);
     node.template declare_parameter<double>("frequency_tolerance", 0.1);
     node.template declare_parameter<double>("timestamp_min_acceptable", -1);
-    node.template declare_parameter<double>("timestamp_max_acceptable", 1);
+    node.template declare_parameter<double>("timestamp_max_acceptable",  1);
+
+    // Watchdog
+    node.template declare_parameter<int>("no_data_timeout_sec", 5); // N초 무응답 시 재시작
+    node.template declare_parameter<bool>("auto_restart", true);    // 자동 재시작 on/off
   }
 
   /**
-   * Load the initial parameters
-   *
-   * This method is a template function because the node and lifecycle node
-   * are not sharing the same implementation but have the same interface.
-   *
-   * @tparam NodeT Templated node input
-   * @param node Node
+   * Load parameters (shared by ROS2 node and Lifecycle node).
    */
-  template <typename NodeT> void loadParameters(NodeT &node) {
+  template <typename NodeT>
+  void loadParameters(NodeT &node) {
     node.template get_parameter<std::string>("frame_id", m_config.m_frame_id);
     RCLCPP_INFO(getLogger(), "frame_id: %s", m_config.m_frame_id.c_str());
 
@@ -159,7 +149,6 @@ public:
     std::string host_ip;
     node.template get_parameter<std::string>("host_ip", host_ip);
     RCLCPP_INFO(getLogger(), "host_ip: %s", host_ip.c_str());
-    // TODO check if valid IP?
     m_config.m_communications_settings.host_ip =
         boost::asio::ip::address_v4::from_string(host_ip);
 
@@ -192,11 +181,9 @@ public:
     node.template get_parameter<float>("angle_end", angle_end);
     RCLCPP_INFO(getLogger(), "angle_end: %f", angle_end);
 
-    // Included check before calculations to prevent rounding errors while
-    // calculating
     if (angle_start == angle_end) {
       m_config.m_communications_settings.start_angle = sick::radToDeg(0);
-      m_config.m_communications_settings.end_angle = sick::radToDeg(0);
+      m_config.m_communications_settings.end_angle   = sick::radToDeg(0);
     } else {
       m_config.m_communications_settings.start_angle =
           sick::radToDeg(angle_start) - m_config.m_angle_offset;
@@ -209,94 +196,81 @@ public:
 
     // Features
     bool general_system_state;
-    node.template get_parameter<bool>("general_system_state",
-                                      general_system_state);
-    RCLCPP_INFO(getLogger(), "general_system_state: %s",
-                btoa(general_system_state).c_str());
+    node.template get_parameter<bool>("general_system_state", general_system_state);
+    RCLCPP_INFO(getLogger(), "general_system_state: %s", btoa(general_system_state).c_str());
 
     bool derived_settings;
     node.template get_parameter<bool>("derived_settings", derived_settings);
-    RCLCPP_INFO(getLogger(), "derived_settings: %s",
-                btoa(derived_settings).c_str());
+    RCLCPP_INFO(getLogger(), "derived_settings: %s", btoa(derived_settings).c_str());
 
     bool measurement_data;
     node.template get_parameter<bool>("measurement_data", measurement_data);
-    RCLCPP_INFO(getLogger(), "measurement_data: %s",
-                btoa(measurement_data).c_str());
+    RCLCPP_INFO(getLogger(), "measurement_data: %s", btoa(measurement_data).c_str());
 
     bool intrusion_data;
     node.template get_parameter<bool>("intrusion_data", intrusion_data);
-    RCLCPP_INFO(getLogger(), "intrusion_data: %s",
-                btoa(intrusion_data).c_str());
+    RCLCPP_INFO(getLogger(), "intrusion_data: %s", btoa(intrusion_data).c_str());
 
     bool application_io_data;
-    node.template get_parameter<bool>("application_io_data",
-                                      application_io_data);
-    RCLCPP_INFO(getLogger(), "application_io_data: %s",
-                btoa(application_io_data).c_str());
+    node.template get_parameter<bool>("application_io_data", application_io_data);
+    RCLCPP_INFO(getLogger(), "application_io_data: %s", btoa(application_io_data).c_str());
 
     m_config.m_communications_settings.features =
         sick::SensorDataFeatures::toFeatureFlags(
             general_system_state, derived_settings, measurement_data,
             intrusion_data, application_io_data);
 
-    node.template get_parameter<bool>("use_persistent_config",
-                                      m_config.m_use_pers_conf);
-    RCLCPP_INFO(getLogger(), "use_persistent_config: %s",
-                btoa(m_config.m_use_pers_conf).c_str());
+    node.template get_parameter<bool>("use_persistent_config", m_config.m_use_pers_conf);
+    RCLCPP_INFO(getLogger(), "use_persistent_config: %s", btoa(m_config.m_use_pers_conf).c_str());
 
-    node.template get_parameter<double>("min_intensities",
-                                        m_config.m_min_intensities);
+    node.template get_parameter<double>("min_intensities", m_config.m_min_intensities);
     RCLCPP_INFO(getLogger(), "min_intensities: %f", m_config.m_min_intensities);
 
-    node.template get_parameter<double>("expected_frequency",
-                                        m_config.m_expected_frequency);
-    RCLCPP_INFO(getLogger(), "expected_frequency: %f",
-                m_config.m_expected_frequency);
+    node.template get_parameter<double>("expected_frequency", m_config.m_expected_frequency);
+    RCLCPP_INFO(getLogger(), "expected_frequency: %f", m_config.m_expected_frequency);
 
-    node.template get_parameter<double>("frequency_tolerance",
-                                        m_config.m_frequency_tolerance);
-    RCLCPP_INFO(getLogger(), "frequency_tolerance: %f",
-                m_config.m_frequency_tolerance);
+    node.template get_parameter<double>("frequency_tolerance", m_config.m_frequency_tolerance);
+    RCLCPP_INFO(getLogger(), "frequency_tolerance: %f", m_config.m_frequency_tolerance);
 
-    node.template get_parameter<double>("timestamp_min_acceptable",
-                                        m_config.m_timestamp_min_acceptable);
-    RCLCPP_INFO(getLogger(), "timestamp_min_acceptable: %f",
-                m_config.m_timestamp_min_acceptable);
+    node.template get_parameter<double>("timestamp_min_acceptable", m_config.m_timestamp_min_acceptable);
+    RCLCPP_INFO(getLogger(), "timestamp_min_acceptable: %f", m_config.m_timestamp_min_acceptable);
 
-    node.template get_parameter<double>("timestamp_max_acceptable",
-                                        m_config.m_timestamp_max_acceptable);
-    RCLCPP_INFO(getLogger(), "timestamp_max_acceptable: %f",
-                m_config.m_timestamp_max_acceptable);
+    node.template get_parameter<double>("timestamp_max_acceptable", m_config.m_timestamp_max_acceptable);
+    RCLCPP_INFO(getLogger(), "timestamp_max_acceptable: %f", m_config.m_timestamp_max_acceptable);
+
+    // Watchdog params
+    int no_data_timeout_sec = 5;
+    node.template get_parameter<int>("no_data_timeout_sec", no_data_timeout_sec);
+    m_no_data_timeout_sec_ = std::max(1, no_data_timeout_sec);
+    RCLCPP_INFO(getLogger(), "no_data_timeout_sec: %d", m_no_data_timeout_sec_);
+
+    bool auto_restart = true;
+    node.template get_parameter<bool>("auto_restart", auto_restart);
+    m_auto_restart_ = auto_restart;
+    RCLCPP_INFO(getLogger(), "auto_restart: %s", m_auto_restart_ ? "true" : "false");
   }
 
-  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
-      m_param_callback;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr m_param_callback;
+
   rcl_interfaces::msg::SetParametersResult
   parametersCallback(std::vector<rclcpp::Parameter> parameters);
 
-  // Diagnostics
-  std::shared_ptr<diagnostic_updater::Updater> m_diagnostic_updater;
-  std::shared_ptr<DiagnosedLaserScanPublisher> m_diagnosed_laser_scan_publisher;
+  // Diagnostics objects
+  std::shared_ptr<diagnostic_updater::Updater>              m_diagnostic_updater;
+  std::shared_ptr<DiagnosedLaserScanPublisher>              m_diagnosed_laser_scan_publisher;
 
-  // Device and Communication
-  std::unique_ptr<sick::AsyncSickSafetyScanner> m_device;
+  // Device
+  std::unique_ptr<sick::AsyncSickSafetyScanner>             m_device;
 
-  /**
-   * Setup the device communication
-   * @param callback Callback that fires when a new UDP packet is received
-   */
-  void setupCommunication(
-      std::function<void(const sick::datastructure::Data &)> callback);
+  /** Setup the device communication */
+  void setupCommunication(std::function<void(const sick::datastructure::Data &)> callback);
 
-  /**
-   * Start the sensor communication by receiving UDP packets
-   */
+  /** Start the sensor communication by receiving UDP packets */
   template <typename NodeT>
   void startCommunication(
       NodeT *node,
       rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr publisher) {
-    // Set-up diagnostics
+    // Diagnostics
     m_diagnostic_updater = std::make_shared<diagnostic_updater::Updater>(node);
     m_diagnostic_updater->setHardwareID(m_config.m_sensor_ip.to_string());
 
@@ -305,15 +279,13 @@ public:
         m_config.m_frequency_tolerance);
 
     diagnostic_updater::TimeStampStatusParam timestamp_param(
-        m_config.m_timestamp_min_acceptable,
-        m_config.m_timestamp_max_acceptable);
+        m_config.m_timestamp_min_acceptable, m_config.m_timestamp_max_acceptable);
 
     m_diagnosed_laser_scan_publisher =
         std::make_shared<DiagnosedLaserScanPublisher>(
             publisher, *m_diagnostic_updater, frequency_param, timestamp_param);
 
-    m_diagnostic_updater->add("State", this,
-                              &SickSafetyscanners::sensorDiagnostics);
+    m_diagnostic_updater->add("State", this, &SickSafetyscanners::sensorDiagnostics);
 
     // Start async receiving and processing of sensor data
     RCLCPP_INFO(getLogger(), "Run");
@@ -321,30 +293,23 @@ public:
     m_device->changeSensorSettings(m_config.m_communications_settings);
   }
 
-  /**
-   * Stop the sensor communication
-   */
+  /** Stop the sensor communication */
   void stopCommunication();
 
-  // Diagnostics
-  sick_safetyscanners2_interfaces::msg::RawMicroScanData m_last_raw_msg;
-  void sensorDiagnostics(
-      diagnostic_updater::DiagnosticStatusWrapper &diagnostic_status);
+  /** Diagnostic callback (registered above) */
+  void sensorDiagnostics(diagnostic_updater::DiagnosticStatusWrapper &diagnostic_status);
 
-  // Methods Triggering COLA2 calls towards the sensor
+protected:
+  // === Accessible from ROS2/Lifecycle derived nodes ===
+  sick_safetyscanners2_interfaces::msg::RawMicroScanData m_last_raw_msg;
+
   bool getFieldData(
-      const std::shared_ptr<
-          sick_safetyscanners2_interfaces::srv::FieldData::Request>
-          request,
-      std::shared_ptr<sick_safetyscanners2_interfaces::srv::FieldData::Response>
-          response);
+      const std::shared_ptr<sick_safetyscanners2_interfaces::srv::FieldData::Request> request,
+      std::shared_ptr<sick_safetyscanners2_interfaces::srv::FieldData::Response> response);
+
   bool getStatusOverview(
-      const std::shared_ptr<
-          sick_safetyscanners2_interfaces::srv::StatusOverview::Request>
-          request,
-      std::shared_ptr<
-          sick_safetyscanners2_interfaces::srv::StatusOverview::Response>
-          response);
+      const std::shared_ptr<sick_safetyscanners2_interfaces::srv::StatusOverview::Request> request,
+      std::shared_ptr<sick_safetyscanners2_interfaces::srv::StatusOverview::Response> response);
 
   void readPersistentConfig();
   void readTypeCodeSettings();
@@ -352,8 +317,19 @@ public:
   void readFirmwareVersion();
 
 private:
-  rclcpp::Logger getLogger() {
-    return rclcpp::get_logger("SickSafetyscanners");
-  }
+  // === Watchdog / reconnect implementation ===
+  void startWatchdog(const std::function<void(const sick::datastructure::Data&)>& wrapped_cb);
+  void stopWatchdog();
+  void markDataReceived_();
+  void restartCommunication_(const std::function<void(const sick::datastructure::Data&)>& wrapped_cb);
+
+  std::atomic<bool>    m_watchdog_running_{false};
+  std::thread          m_watchdog_thread_;
+  std::atomic<int64_t> m_last_rx_steady_ns_{0};
+  int                  m_no_data_timeout_sec_{5};
+  bool                 m_auto_restart_{true};
+
+  rclcpp::Logger getLogger() { return rclcpp::get_logger("SickSafetyscanners"); }
 };
+
 } // namespace sick

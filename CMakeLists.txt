@@ -25,6 +25,8 @@ find_package(lifecycle_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(sick_safetyscanners_base REQUIRED)
 find_package(sick_safetyscanners2_interfaces REQUIRED)
+find_package(fmt REQUIRED)
+find_package(spdlog REQUIRED)
 
 set(dependencies
         diagnostic_updater
@@ -44,7 +46,9 @@ add_executable(sick_safetyscanners2_node
 
 target_link_libraries(sick_safetyscanners2_node
         sick_safetyscanners_base::sick_safetyscanners_base
-        ${Boost_LIBRARIES})
+        spdlog::spdlog
+        ${Boost_LIBRARIES}
+        fmt::fmt)
 
 ament_target_dependencies(sick_safetyscanners2_node ${dependencies})
 
@@ -60,7 +64,9 @@ add_executable(sick_safetyscanners2_lifecycle_node
 
 target_link_libraries(sick_safetyscanners2_lifecycle_node
         sick_safetyscanners_base::sick_safetyscanners_base
-        ${Boost_LIBRARIES})
+        spdlog::spdlog
+        ${Boost_LIBRARIES}
+        fmt::fmt)
 
 ament_target_dependencies(sick_safetyscanners2_lifecycle_node ${dependencies})
 

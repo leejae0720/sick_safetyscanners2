@@ -32,6 +32,84 @@
 
 #include <sick_safetyscanners2/SickSafetyscanners.hpp>
 
+namespace {
+// --- 파일 로컬(전역) 워치독 상태: 헤더 수정 없이 동작하도록 설계 ---
+std::atomic<bool> g_watchdog_running{false};
+std::thread       g_watchdog_thread;
+std::atomic<int64_t> g_last_rx_ns{0};
+constexpr int kTimeoutSec = 5;                 // 무응답 허용 시간(초) — 필요시 숫자만 바꾸세요.
+
+// 재시작 시 필요한 컨텍스트: 현재 인스턴스와 래핑된 콜백
+sick::SickSafetyscanners* g_self = nullptr;
+std::function<void(const sick::datastructure::Data&)> g_wrapped_cb;
+
+inline void mark_rx_now() {
+  auto now = std::chrono::steady_clock::now().time_since_epoch();
+  g_last_rx_ns.store(
+    std::chrono::duration_cast<std::chrono::nanoseconds>(now).count(),
+    std::memory_order_relaxed);
+}
+
+inline void stop_watchdog() {
+  if (!g_watchdog_running.exchange(false)) return;
+  if (g_watchdog_thread.joinable()) g_watchdog_thread.join();
+}
+
+// g_self, g_wrapped_cb를 이용해 통신을 (재)설정
+inline void restart_comm() {
+  if (!g_self) return;
+  auto& self = *g_self;
+  try {
+    if (self.m_device) self.m_device->stop();
+  } catch (...) {}
+  self.m_diagnosed_laser_scan_publisher.reset();
+  self.m_diagnostic_updater.reset();
+
+  // 센서 인스턴스 재생성
+  if (self.m_config.m_communications_settings.host_ip.is_multicast()) {
+    self.m_device = std::make_unique<sick::AsyncSickSafetyScanner>(
+        self.m_config.m_sensor_ip, self.m_config.m_tcp_port,
+        self.m_config.m_communications_settings, self.m_config.m_interface_ip,
+        g_wrapped_cb);
+  } else {
+    self.m_device = std::make_unique<sick::AsyncSickSafetyScanner>(
+        self.m_config.m_sensor_ip, self.m_config.m_tcp_port,
+        self.m_config.m_communications_settings, g_wrapped_cb);
+  }
+
+  spdlog::info("Communication to Sensor set up (re)started");
+
+  // 재연결 시에는 소켓만 재생성 (메타정보는 초기 1회만)
+  self.m_config.setupMsgCreator();  // 이건 public이라 호출 가능
+
+  // run/설정 적용은 startCommunication()에서 하므로 여기선 수신시간만 리셋
+  mark_rx_now();
+}
+
+inline void start_watchdog() {
+  if (g_watchdog_running.exchange(true)) return;
+  mark_rx_now();
+  g_watchdog_thread = std::thread([](){
+    using namespace std::chrono_literals;
+    while (g_watchdog_running.load()) {
+      std::this_thread::sleep_for(1s);
+      const auto last = g_last_rx_ns.load(std::memory_order_relaxed);
+      const auto now  = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch()).count();
+      const auto diff_ms = (now - last) / 1'000'000;
+      if (diff_ms > kTimeoutSec * 1000) {
+        if (g_self) {
+          spdlog::warn(
+            "No LiDAR data for %lld ms (> %d s). Restarting driver...",
+            (long long)diff_ms, kTimeoutSec);
+        }
+        restart_comm();
+      }
+    }
+  });
+}
+} // anonymous namespace
+
 namespace sick {
 rcl_interfaces::msg::SetParametersResult SickSafetyscanners::parametersCallback(
     std::vector<rclcpp::Parameter> parameters) {
@@ -48,7 +126,7 @@ rcl_interfaces::msg::SetParametersResult SickSafetyscanners::parametersCallback(
 
     std::stringstream ss;
     ss << "{" << param.get_name() << ", " << param.value_to_string() << "}";
-    RCLCPP_INFO(getLogger(), "Got parameter: '%s'", ss.str().c_str());
+    spdlog::info("Got parameter: '%s'", ss.str().c_str());
 
     if (param.get_name() == "frame_id") {
       m_config.m_frame_id = param.value_to_string();
@@ -123,36 +201,39 @@ rcl_interfaces::msg::SetParametersResult SickSafetyscanners::parametersCallback(
 
 void SickSafetyscanners::setupCommunication(
     std::function<void(const sick::datastructure::Data &)> callback) {
-  // Create a sensor instance
-  if (m_config.m_communications_settings.host_ip.is_multicast()) {
-    m_device = std::make_unique<sick::AsyncSickSafetyScanner>(
-        m_config.m_sensor_ip, m_config.m_tcp_port,
-        m_config.m_communications_settings, m_config.m_interface_ip, callback);
-  } else {
-    m_device = std::make_unique<sick::AsyncSickSafetyScanner>(
-        m_config.m_sensor_ip, m_config.m_tcp_port,
-        m_config.m_communications_settings, callback);
-  }
+  // 1) 수신 콜백 래핑: 데이터 들어올 때마다 최근시각 기록
+  g_self = this;
+  g_wrapped_cb = [callback](const sick::datastructure::Data& d) {
+    mark_rx_now();
+    if (callback) callback(d);
+  };
 
-  RCLCPP_INFO(getLogger(), "Communication to Sensor set up");
+  // 2) (초기) 통신 설정: 디바이스 재생성(소켓 준비)만 수행
+  restart_comm();
 
-  // Read sensor specific configurations
+  // ✅ 3) 초기 1회: 센서 메타정보/설정 읽기 (멤버 함수라 protected 접근 가능)
   readTypeCodeSettings();
   readMetadata();
   readFirmwareVersion();
-
   if (m_config.m_use_pers_conf) {
     readPersistentConfig();
   }
+  m_config.setupMsgCreator();  // 메타정보 반영해서 메시지 생성기 구성
 
-  m_config.setupMsgCreator();
+  RCLCPP_INFO(getLogger(), "Communication to Sensor set up");
+
+  // 4) 워치독 시작 (1초마다 체크, 5초 무응답 시 restart_comm())
+  start_watchdog();
 }
 
 void SickSafetyscanners::stopCommunication() {
-  m_device->stop();
+  // 워치독 먼저 종료
+  stop_watchdog();
+  if (m_device) m_device->stop();
   m_diagnosed_laser_scan_publisher.reset();
   m_diagnostic_updater.reset();
 }
+
 
 std::string boolToString(bool b) { return b ? "true" : "false"; }
 
@@ -318,7 +399,7 @@ bool SickSafetyscanners::getStatusOverview(
 }
 
 void SickSafetyscanners::readTypeCodeSettings() {
-  RCLCPP_INFO(getLogger(), "Reading Type code settings");
+  spdlog::info("Reading Type code settings");
   sick::datastructure::TypeCode type_code;
   m_device->requestTypeCode(type_code);
   m_config.m_communications_settings.e_interface_type =
@@ -328,7 +409,7 @@ void SickSafetyscanners::readTypeCodeSettings() {
 }
 
 void SickSafetyscanners::readPersistentConfig() {
-  RCLCPP_INFO(getLogger(), "Reading Persistent Configuration");
+  spdlog::info("Reading Persistent Configuration");
   sick::datastructure::ConfigData config_data;
   m_device->requestPersistentConfig(config_data);
   m_config.m_communications_settings.start_angle = config_data.getStartAngle();
@@ -336,12 +417,12 @@ void SickSafetyscanners::readPersistentConfig() {
 }
 
 void SickSafetyscanners::readMetadata() {
-  RCLCPP_INFO(getLogger(), "Reading Metadata");
+  spdlog::info("Reading Metadata");
   m_device->requestConfigMetadata(m_config.m_metadata);
 }
 
 void SickSafetyscanners::readFirmwareVersion() {
-  RCLCPP_INFO(getLogger(), "Reading firmware version");
+  spdlog::info("Reading firmware version");
   m_device->requestFirmwareVersion(m_config.m_firmware_version);
 }
 } // namespace sick
