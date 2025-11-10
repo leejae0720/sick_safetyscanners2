@@ -96,11 +96,11 @@ inline void restart_comm() {
     // 성공시 수신 타임스탬프 리셋
     mark_rx_now();
   } catch (const std::exception& e) {
-    spdlog::error("LiDAR restart failed: {}", e.what());
-    return; // 다음 워치독 주기에 재시도
+      spdlog::error("LiDAR restart failed: {}", e.what());
+      return; // 다음 워치독 주기에 재시도
   } catch (...) {
-    spdlog::error("LiDAR restart failed: unknown error");
-    return;
+      spdlog::error("LiDAR restart failed: unknown error");
+      return;
   }
 
   // 재연결 시에는 소켓만 재생성하면 충분 (메타정보 읽기는 초기 1회만)
