@@ -27,7 +27,11 @@ def generate_launch_description():
                  "intrusion_data": True,
                  "application_io_data": True,
                  "use_persistent_config": False,
-                 "min_intensities": 0.0}
+                 "min_intensities": 0.0,
+                 "no_data_timeout_sec": 5,      # after 5 second driver restart
+                 "auto_restart": True,          # auto restart True/False
+                 "log_file_path": "/home/george/sicklidar_ws/log/sick_log/sick_log.txt",
+                 }
             ]
         )
     ])

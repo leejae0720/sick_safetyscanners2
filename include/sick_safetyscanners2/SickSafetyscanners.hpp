@@ -20,7 +20,9 @@
 
 #pragma once
 
-#include "spdlog/spdlog.h"
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/rotating_file_sink.h>
+#include <filesystem>
 #include <string>
 #include <atomic>
 #include <thread>
@@ -72,6 +74,7 @@ public:
     boost::asio::ip::address_v4 m_interface_ip;
     std::string m_frame_id;
     double m_time_offset = 0.0;
+    int m_no_data_timeout_sec = 5;
     double m_range_min = 0.0;
     double m_range_max{};
     double m_frequency_tolerance = 0.1;
@@ -82,6 +85,7 @@ public:
     bool   m_use_sick_angles{};
     float  m_angle_offset = -90.0f;
     bool   m_use_pers_conf = false;
+    std::string m_log_file_path;
 
     sick::types::port_t m_tcp_port = 2122;
 
@@ -126,6 +130,9 @@ public:
     // Watchdog
     node.template declare_parameter<int>("no_data_timeout_sec", 5); // N초 무응답 시 재시작
     node.template declare_parameter<bool>("auto_restart", true);    // 자동 재시작 on/off
+
+    // logging
+    node.template declare_parameter<std::string>("log_file_path", "../sicklidar_ws/log/sick_log/sick_log.txt");
   }
 
   /**
@@ -195,6 +202,11 @@ public:
     node.template get_parameter<double>("time_offset", m_config.m_time_offset);
     RCLCPP_INFO(getLogger(), "time_offset: %f", m_config.m_time_offset);
 
+    int timeout_sec = m_config.m_no_data_timeout_sec;
+    node.template get_parameter<int>("no_data_timeout_sec", timeout_sec);
+    m_config.m_no_data_timeout_sec = std::max(1, timeout_sec);
+    spdlog::info("no_data_timeout_sec: {}", m_config.m_no_data_timeout_sec);
+
     // Features
     bool general_system_state;
     node.template get_parameter<bool>("general_system_state", general_system_state);
@@ -240,7 +252,7 @@ public:
     RCLCPP_INFO(getLogger(), "timestamp_max_acceptable: %f", m_config.m_timestamp_max_acceptable);
 
     // Watchdog params
-    int no_data_timeout_sec = 5;
+    int no_data_timeout_sec = 5;  // default time
     node.template get_parameter<int>("no_data_timeout_sec", no_data_timeout_sec);
     m_no_data_timeout_sec_ = std::max(1, no_data_timeout_sec);
     RCLCPP_INFO(getLogger(), "no_data_timeout_sec: %d", m_no_data_timeout_sec_);
@@ -249,6 +261,10 @@ public:
     node.template get_parameter<bool>("auto_restart", auto_restart);
     m_auto_restart_ = auto_restart;
     RCLCPP_INFO(getLogger(), "auto_restart: %s", m_auto_restart_ ? "true" : "false");
+
+    // logging file
+    node.template get_parameter<std::string>("log_file_path", m_config.m_log_file_path);
+    RCLCPP_INFO(getLogger(), "log_file_path: %s", m_config.m_log_file_path.c_str());
   }
 
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr m_param_callback;
@@ -289,9 +305,9 @@ public:
     m_diagnostic_updater->add("State", this, &SickSafetyscanners::sensorDiagnostics);
 
     // Start async receiving and processing of sensor data
-    RCLCPP_INFO(getLogger(), "Run");
-    m_device->run();
-    m_device->changeSensorSettings(m_config.m_communications_settings);
+    // RCLCPP_INFO(getLogger(), "Run");
+    // m_device->run();
+    // m_device->changeSensorSettings(m_config.m_communications_settings);
   }
 
   /** Stop the sensor communication */

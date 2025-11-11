@@ -32,103 +32,123 @@
 
 #include <sick_safetyscanners2/SickSafetyscanners.hpp>
 
+#define MAX_LOG_SIZE 5 * 20 * 1024 * 1024   // 20MB * 5 = 100 MB
+#define MAX_LOG_FILES 20                    // 로그 파일 갯수 (5MB * 20 = 1GB)
+
+using namespace std::chrono_literals;
+
 namespace {
 
-std::mutex g_comm_mtx;                 // 통신 리스타트 동기화용
-std::atomic<bool> g_restarting{false}; // 재시작 중 플래그
-// --- 파일 로컬(전역) 워치독 상태: 헤더 수정 없이 동작하도록 설계 ---
-std::atomic<bool> g_watchdog_running{false};
-std::thread       g_watchdog_thread;
-std::atomic<int64_t> g_last_rx_ns{0};
-constexpr int kTimeoutSec = 5; // 무응답 허용 시간(초)
+  std::mutex g_comm_mtx;                 // 통신 리스타트 동기화용
+  std::atomic<bool> g_restarting{false}; // 재시작 중 플래그
+  // --- 파일 로컬(전역) 워치독 상태: 헤더 수정 없이 동작하도록 설계 ---
+  std::atomic<bool> g_watchdog_running{false};
+  std::thread       g_watchdog_thread;
+  std::atomic<int64_t> g_last_rx_ns{0};
+  // constexpr int kTimeoutSec = self.m_config.m_no_data_timeout_sec; // 무응답 허용 시간(초)
+  std::atomic<int> g_timeout_sec{5};
 
-// 재시작 시 필요한 컨텍스트: 현재 인스턴스와 래핑된 콜백
-sick::SickSafetyscanners* g_self = nullptr;
-std::function<void(const sick::datastructure::Data&)> g_wrapped_cb;
+  // 재시작 시 필요한 컨텍스트: 현재 인스턴스와 래핑된 콜백
+  sick::SickSafetyscanners* g_self = nullptr;
+  std::function<void(const sick::datastructure::Data&)> g_wrapped_cb;
 
-inline void mark_rx_now() {
-  auto now = std::chrono::steady_clock::now().time_since_epoch();
-  g_last_rx_ns.store(
-    std::chrono::duration_cast<std::chrono::nanoseconds>(now).count(),
-    std::memory_order_relaxed);
-}
-
-inline void stop_watchdog() {
-  if (!g_watchdog_running.exchange(false)) return;
-  if (g_watchdog_thread.joinable()) g_watchdog_thread.join();
-}
-
-// 통신 (재)설정
-inline void restart_comm() {
-  if (!g_self) return;
-  auto& self = *g_self;
-
-  // 1) 이전 디바이스 안전 종료 (예외 무시)
-  try {
-    if (self.m_device) self.m_device->stop();
-  } catch (const std::exception& e) {
-    spdlog::warn("stop() during restart raised: {}", e.what());
-  } catch (...) {
-    spdlog::warn("stop() during restart raised: unknown error");
+  inline void setup_logger(const std::string& log_file_path) {
+    try {
+      auto logger = spdlog::rotating_logger_mt("sick_log", log_file_path, MAX_LOG_SIZE, MAX_LOG_FILES);
+      spdlog::set_default_logger(logger);
+      spdlog::set_level(spdlog::level::info);
+      spdlog::flush_on(spdlog::level::info);  
+	  } catch (const spdlog::spdlog_ex &ex) {
+		  std::cerr << "Log initialization failed: " << ex.what() << std::endl;
+	  }
   }
 
-  // (주의) 퍼블리셔/업데이터는 여기서 reset하지 않음 — 재시작 중 콜백 경합 위험 방지 목적이면
-  // 콜백 쪽에서 가드하거나(재시작 플래그) stop 시에만 정리.
+  inline void mark_rx_now() {
+    auto now = std::chrono::steady_clock::now().time_since_epoch();
+    g_last_rx_ns.store(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(now).count(),
+      std::memory_order_relaxed);
+  }
 
-  // 2) 디바이스 재생성 + run + 설정 적용
-  try {
-    if (self.m_config.m_communications_settings.host_ip.is_multicast()) {
-      self.m_device = std::make_unique<sick::AsyncSickSafetyScanner>(
-          self.m_config.m_sensor_ip, self.m_config.m_tcp_port,
-          self.m_config.m_communications_settings, self.m_config.m_interface_ip,
-          g_wrapped_cb);
-    } else {
-      self.m_device = std::make_unique<sick::AsyncSickSafetyScanner>(
-          self.m_config.m_sensor_ip, self.m_config.m_tcp_port,
-          self.m_config.m_communications_settings, g_wrapped_cb);
+  inline void stop_watchdog() {
+    if (!g_watchdog_running.exchange(false)) return;
+    if (g_watchdog_thread.joinable()) g_watchdog_thread.join();
+  }
+
+  // 통신 (재)설정
+  inline bool restart_comm() {
+    if (!g_self) return false;
+    auto& self = *g_self;
+
+    // 1) 이전 디바이스 안전 종료 (예외 무시)
+    try {
+      if (self.m_device) self.m_device->stop();
+    } catch (const std::exception& e) {
+      spdlog::warn("stop() during restart raised: {}", e.what());
+    } catch (...) {
+      spdlog::warn("stop() during restart raised: unknown error");
     }
 
-    // 재시작 시에도 run()과 설정 적용 필요
-    self.m_device->run();
-    self.m_device->changeSensorSettings(self.m_config.m_communications_settings);
+    // (주의) 퍼블리셔/업데이터는 여기서 reset하지 않음 — 재시작 중 콜백 경합 위험 방지 목적이면
+    // 콜백 쪽에서 가드하거나(재시작 플래그) stop 시에만 정리.
 
-    spdlog::info("Communication to Sensor set up (re)started");
-    // 성공시 수신 타임스탬프 리셋
-    mark_rx_now();
-  } catch (const std::exception& e) {
-      spdlog::error("LiDAR restart failed: {}", e.what());
-      return; // 다음 워치독 주기에 재시도
-  } catch (...) {
-      spdlog::error("LiDAR restart failed: unknown error");
-      return;
-  }
-
-  // 재연결 시에는 소켓만 재생성하면 충분 (메타정보 읽기는 초기 1회만)
-  self.m_config.setupMsgCreator();
-}
-
-inline void start_watchdog() {
-  if (g_watchdog_running.exchange(true)) return;
-  mark_rx_now();
-  g_watchdog_thread = std::thread([](){
-    using namespace std::chrono_literals;
-    while (g_watchdog_running.load()) {
-      std::this_thread::sleep_for(1s);
-      const auto last = g_last_rx_ns.load(std::memory_order_relaxed);
-      const auto now  = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                         std::chrono::steady_clock::now().time_since_epoch()).count();
-      const auto diff_ms = (now - last) / 1'000'000;
-      if (diff_ms > kTimeoutSec * 1000) {
-        if (g_self) {
-          spdlog::warn("No LiDAR data for {} ms (> {} s). Restarting driver...",
-                       (long long)diff_ms, kTimeoutSec);
-        }
-        restart_comm();
+    // 2) 디바이스 재생성 + run + 설정 적용
+    try {
+      if (self.m_config.m_communications_settings.host_ip.is_multicast()) {
+        self.m_device = std::make_unique<sick::AsyncSickSafetyScanner>(
+            self.m_config.m_sensor_ip, self.m_config.m_tcp_port,
+            self.m_config.m_communications_settings, self.m_config.m_interface_ip,
+            g_wrapped_cb);
+      } else {
+        self.m_device = std::make_unique<sick::AsyncSickSafetyScanner>(
+            self.m_config.m_sensor_ip, self.m_config.m_tcp_port,
+            self.m_config.m_communications_settings, g_wrapped_cb);
       }
-    }
-  });
-}
 
+      // 재시작 시에도 run()과 설정 적용 필요
+      self.m_device->run();
+      self.m_device->changeSensorSettings(self.m_config.m_communications_settings);
+
+      spdlog::info("Communication to Sensor set up (re)started");
+      // 성공시 수신 타임스탬프 리셋
+      mark_rx_now();
+    } catch (const std::exception& e) {
+        spdlog::error("LiDAR restart failed: {}", e.what());
+        return false; // 다음 워치독 주기에 재시도
+    } catch (...) {
+        spdlog::error("LiDAR restart failed: unknown error");
+        return false;
+    }
+
+    // 재연결 시에는 소켓만 재생성하면 충분 (메타정보 읽기는 초기 1회만)
+    self.m_config.setupMsgCreator();
+    return true;
+  }
+
+  inline void start_watchdog() {
+    if (g_watchdog_running.exchange(true)) return;
+    mark_rx_now();
+    g_watchdog_thread = std::thread([](){
+      using namespace std::chrono_literals;
+      while (g_watchdog_running.load()) {
+        std::this_thread::sleep_for(1s);
+        const auto last = g_last_rx_ns.load(std::memory_order_relaxed);
+        const auto now  = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch()).count();
+        const auto diff_ms = (now - last) / 1'000'000;
+
+        const int timeout_sec = g_timeout_sec.load(std::memory_order_relaxed);
+
+        if (diff_ms > static_cast<long long>(timeout_sec) * 1000LL) {
+          if (g_self) {
+            spdlog::warn("No LiDAR data for {} ms (> {} s). Restarting driver...",
+                        (long long)diff_ms, timeout_sec);
+          }
+          restart_comm();
+        }
+      }
+    });
+  }
 } // anonymous namespace
 
 namespace sick {
@@ -207,7 +227,10 @@ rcl_interfaces::msg::SetParametersResult SickSafetyscanners::parametersCallback(
       update_sensor_config = true;
     } else if (param.get_name() == "min_intensities") {
       m_config.m_min_intensities = param.as_double();
-    } else {
+    } else if (param.get_name() == "log_file_path") {
+      m_config.m_log_file_path = param.value_to_string();
+    }
+    else {
       throw std::runtime_error("Parameter is not dynamic reconfigurable");
     }
   }
@@ -222,7 +245,11 @@ rcl_interfaces::msg::SetParametersResult SickSafetyscanners::parametersCallback(
 }
 
 void SickSafetyscanners::setupCommunication(
-    std::function<void(const sick::datastructure::Data &)> callback) {
+  std::function<void(const sick::datastructure::Data &)> callback) {
+  setup_logger(m_config.m_log_file_path);
+
+  g_timeout_sec.store(m_config.m_no_data_timeout_sec, std::memory_order_relaxed);
+
   // 1) 수신 콜백 래핑: 데이터 들어올 때마다 최근시각 기록
   g_self = this;
   g_wrapped_cb = [callback](const sick::datastructure::Data& d) {
@@ -231,20 +258,24 @@ void SickSafetyscanners::setupCommunication(
   };
 
   // 2) (초기) 통신 설정: 디바이스 재생성(소켓 준비)만 수행
-  restart_comm();
+  bool ok = restart_comm();
 
-  // 3) 초기 1회: 센서 메타정보/설정 읽기
-  readTypeCodeSettings();
-  readMetadata();
-  readFirmwareVersion();
-  if (m_config.m_use_pers_conf) {
-    readPersistentConfig();
+  if (ok) {
+    // ★ 연결이 실제로 성공했을 때만 COLA2 메타정보 읽기
+    readTypeCodeSettings();
+    readMetadata();
+    readFirmwareVersion();
+    if (m_config.m_use_pers_conf) {
+      readPersistentConfig();
+    }
+    m_config.setupMsgCreator();
+    spdlog::info("Communication to Sensor set up");
+  } else {
+    // ★ 실패: 아직 장치가 없음. 메타 읽기 금지.
+    spdlog::warn("Initial connect failed; will retry in watchdog loop.");
   }
-  m_config.setupMsgCreator();  // 메타정보 반영해서 메시지 생성기 구성
 
-  spdlog::info("Communication to Sensor set up");
-
-  // 4) 워치독 시작 (1초마다 체크, 5초 무응답 시 restart_comm())
+  // 어쨌든 워치독은 켭니다. (성공/실패와 상관없이)
   start_watchdog();
 }
 
@@ -427,6 +458,8 @@ bool SickSafetyscanners::getStatusOverview(
 
 void SickSafetyscanners::readTypeCodeSettings() {
   spdlog::info("Reading Type code settings");
+  spdlog::info("start lidar frame_id: {0}", m_config.m_frame_id.c_str());
+
   sick::datastructure::TypeCode type_code;
   m_device->requestTypeCode(type_code);
   m_config.m_communications_settings.e_interface_type =
